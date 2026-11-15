@@ -36,10 +36,22 @@ Then connect the sender to Ethernet / Telnet, 127.0.0.1, port 8000. Settings are
 | File | Machine |
 |---|---|
 | `machines/stefan-altfinity.flags` | Stefan's Altfinity: Sienci SuperLongBoard32 Ext, 4 axes (A rotary along X). From its firmware's Web Builder `job.ini`: the built-in defaults and the core features. Its board hardware (Ethernet, Modbus spindle, ATCi, RGB lights, SD card, Y auto-squaring) isn't in the simulator. |
+| `machines/stefan-altfinity.settings` | The same machine's own `$$` settings, as its controller has them now (they differ a lot from the firmware defaults: steps/mm, acceleration, travel, homing direction). Network settings (IP, MAC address) are left out. |
 
-The `.flags` file holds the firmware's built-in defaults. A controller remembers settings
-changed since it was flashed, so load the machine's own `$$` (ncSender: Settings ›
-Firmware › Export) into the simulator once for an exact copy.
+**Two layers.** The `.flags` file builds the firmware (axes, features, defaults). The
+`.settings` file is the machine's live `$$`: a controller remembers every setting changed
+since it was flashed. Load it once into a simulator folder:
+
+```
+python load_settings.py machines/stefan-altfinity.settings --port 8000
+```
+
+Do it while no sender is connected (the simulator serves one connection at a time), then
+**restart the simulator** before connecting the sender: start-up settings take effect, and
+the sender is its first client. (A sender connecting straight after another client
+sometimes found the simulator stuck after `$H`; a restart avoids it.) The loader reads
+`$$` back to check everything was kept, and lists the settings the simulator doesn't have
+(the board's add-ons: 69 of 163 for the Altfinity).
 
 To add a machine: take the `-D` lines from its firmware's `job.ini` (Web Builder), keep
 `N_AXIS`, the `DEFAULT_...` settings and core features, leave out board hardware.
