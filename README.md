@@ -10,6 +10,14 @@ but any sender that talks Grbl over Telnet should work.
 
 One file, Python 3.8 or newer, nothing to install.
 
+**Two ways to stand in for a machine:**
+
+- **`fake_grblhal_server.py`** (this page): a quick Python stand-in that acts like Grbl.
+  Nothing to build, any computer.
+- **[`grblhal-sim/`](grblhal-sim/)**: the real grblHAL firmware running on a PC, built as a
+  copy of a real machine (its settings, planner, rotary A), with limit switches and a probe
+  that work by themselves. Closest to the real thing; a ready-built Windows `.exe` is included.
+
 ## Run it
 
 ```

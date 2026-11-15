@@ -1,0 +1,168 @@
+diff --git a/src/driver.c b/src/driver.c
+index 246471e..790e61c 100644
+--- a/src/driver.c
++++ b/src/driver.c
+@@ -55,6 +55,83 @@ static axes_signals_t motors_0 = {AXES_BITMASK}, motors_1 = {AXES_BITMASK};
+ void Limits1_IRQHandler (void);
+ #endif
+ 
++
++#ifndef VIRTUAL_MACHINE
++#define VIRTUAL_MACHINE 0
++#endif
++
++#if VIRTUAL_MACHINE
++/*
++ * Virtual machine (fake-grblhal): a physical position for each motor, counted from the
++ * step pulses, with a limit switch at the homing end of X, Y and Z (from $23) and at the
++ * far end of travel ($130-$132), and a probe that touches 3 mm into any probing move.
++ * Inputs are reported as already-corrected (logical) states, so the invert settings
++ * ($5, $6, $14 ...) of the machine being copied don't make them read backwards.
++ */
++#include <math.h>
++static volatile int32_t vm_steps[N_AXIS];
++static volatile uint32_t vm_dir;
++static volatile bool vm_ready = false, vm_probing = false, vm_probe_away = false;
++static int32_t vm_probe_start[N_AXIS];
++static uint32_t vm_layout = 0xFFFFFFFF; // $23 the switches were placed for
++
++static void vm_init (void)
++{
++    for(uint_fast8_t i = 0; i < N_AXIS; i++) {
++        float spm = settings.axis[i].steps_per_mm;
++        bool home_neg = (settings.homing.dir_mask.mask >> i) & 1;
++        vm_steps[i] = i < 3 ? (int32_t)lroundf((home_neg ? 20.0f : -20.0f) * spm) : 0;
++    }
++    vm_layout = settings.homing.dir_mask.mask;
++    vm_ready = true;
++}
++
++static uint16_t vm_limit_bits (void)
++{
++    uint16_t bits = 0;
++    if(!vm_ready)
++        return 0;
++    for(uint_fast8_t i = 0; i < N_AXIS && i < 3; i++) {
++        if((settings.steppers.is_rotary.mask >> i) & 1)
++            continue;
++        float spm = settings.axis[i].steps_per_mm, travel = fabsf(settings.axis[i].max_travel);
++        float pos = (float)vm_steps[i] / spm;
++        bool home_neg = (settings.homing.dir_mask.mask >> i) & 1;
++        bool hit = home_neg ? (pos <= 0.0f || pos >= travel + 3.0f) : (pos >= 0.0f || pos <= -(travel + 3.0f));
++        if(hit)
++            bits |= (1 << i);
++    }
++    return bits;
++}
++
++static void vm_step (axes_signals_t step_out)
++{
++    // Changing $23 (which way each axis homes) moves the virtual switches with it:
++    // the machine starts again 20 mm from its switches, not homed.
++    if(!vm_ready || vm_layout != settings.homing.dir_mask.mask)
++        vm_init();
++    for(uint_fast8_t i = 0; i < N_AXIS; i++) {
++        if(step_out.bits & (1 << i))
++            vm_steps[i] += (vm_dir & (1 << i)) ? -1 : 1;
++    }
++    uint16_t bits = vm_limit_bits();
++    if((gpio[LIMITS_PORT0].state.value & AXES_BITMASK) != bits)
++        mcu_gpio_in(&gpio[LIMITS_PORT0], bits, AXES_BITMASK);
++}
++
++static bool vm_probe_contact (void)
++{
++    if(!vm_probing)
++        return false;
++    for(uint_fast8_t i = 0; i < N_AXIS; i++) {
++        float moved = fabsf((float)(vm_steps[i] - vm_probe_start[i]) / settings.axis[i].steps_per_mm);
++        if(moved >= 3.0f)
++            return true;
++    }
++    return false;
++}
++#endif
++
+ status_code_t mc_rigid_tapping (plan_line_data_t *pl_data, coord_data_t *target, coord_data_t *position, float pitch, float rpm_multiplier)
+ {
+     return Status_GcodeUnsupportedCommand; // TBC
+@@ -110,6 +187,9 @@ inline static void set_step_outputs (axes_signals_t step_out)
+ 
+ inline static void set_dir_outputs (axes_signals_t dir_out)
+ {
++#if VIRTUAL_MACHINE
++    vm_dir = dir_out.value;
++#endif
+     mcu_gpio_set(&gpio[DIR_PORT], dir_out.value ^ settings.steppers.dir_invert.mask, AXES_BITMASK);
+ }
+ 
+@@ -160,6 +240,9 @@ static void stepperPulseStart (stepper_t *stepper)
+ 
+     if(stepper->step_out.bits) {
+         set_step_outputs(stepper->step_out);
++#if VIRTUAL_MACHINE
++        vm_step(stepper->step_out);
++#endif
+     }
+ }
+ 
+@@ -184,6 +267,10 @@ static limit_signals_t limitsGetState()
+     limit_signals_t signals = {0};
+ 
+     signals.min.value = gpio[LIMITS_PORT0].state.value;
++#if VIRTUAL_MACHINE
++    signals.min.mask &= AXES_BITMASK;
++    return signals;
++#endif
+ 
+     if (settings.limits.invert.mask)
+         signals.min.mask ^= settings.limits.invert.mask;
+@@ -229,6 +316,9 @@ static limit_signals_t limitsGetHomeState()
+ 
+ static void limitsEnable (bool on, axes_signals_t homing_cycle)
+ {
++#if VIRTUAL_MACHINE
++    on = on && homing_cycle.mask == 0; // as real drivers do: no hard limit interrupts while homing
++#endif
+     gpio[LIMITS_PORT0].irq_mask.mask = on ? AXES_BITMASK : 0;
+     gpio[LIMITS_PORT0].irq_state.mask = 0;
+ 
+@@ -246,6 +336,10 @@ static control_signals_t systemGetState (void)
+ 
+     signals.mask = gpio[CONTROL_PORT].state.value;
+ 	signals.limits_override = settings.control_invert.limits_override;
++#if VIRTUAL_MACHINE
++    signals.limits_override = Off;
++    return signals;
++#endif
+ 
+     if(settings.control_invert.mask)
+         signals.mask ^= settings.control_invert.mask;
+@@ -255,6 +349,14 @@ static control_signals_t systemGetState (void)
+ 
+ static void probeConfigureInvertMask (bool is_probe_away, bool probing)
+ {
++#if VIRTUAL_MACHINE
++  if(!vm_ready)
++      vm_init();
++  for(uint_fast8_t i = 0; i < N_AXIS; i++)
++      vm_probe_start[i] = vm_steps[i];
++  vm_probe_away = is_probe_away;
++  vm_probing = probing;
++#endif
+   probe_invert = settings.probe.invert_probe_pin;
+ 
+   if (is_probe_away)
+@@ -268,6 +370,12 @@ probe_state_t probeGetState (void)
+ 
+     state.value = mcu_gpio_get(&gpio[PROBE_PORT], PROBE_MASK);
+ 
++#if VIRTUAL_MACHINE
++    state.connected = On;
++    state.triggered = vm_probe_contact() != vm_probe_away;
++    return state;
++#endif
++
+     state.triggered ^= probe_invert;
+ 
+     return state;
